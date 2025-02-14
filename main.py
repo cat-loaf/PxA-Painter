@@ -1,17 +1,10 @@
 import pygame, math, os, numpy as np, tkinter as tk
-
 from tkinter import filedialog
-
 from pygame.locals import *
-
 from dataclasses import dataclass
-
 from skimage.segmentation import flood_fill as ff
 
-#TODO Mouse "Drag" action to move camera pos
-#TODO Scaling
 #TODO Saving/Loading to *specific* file
-#TODO More Tools - drag, clear, fill (maybe?)
 #TODO Contiguous/non-contiguous fill
 #TODO Clean code 
 
@@ -208,9 +201,37 @@ def save_file(g : Grid):
 def log(str):
     with open(r"data/logs", "w") as f:
         f.write(str)
+
+def invert_surface(surface, screen, surface_pos):
+    """Inverts the colors of the given surface."""
+    surface = surface.copy()
+    # Get the subsection of the screen to invert
+    subsection = screen.subsurface(pygame.Rect(surface_pos, surface.get_size())).copy()
     
+    # Lock the surface for pixel access
+    subsection.lock()
+    
+    # Invert the colors of the subsection
+    for x in range(subsection.get_width()):
+        for y in range(subsection.get_height()):
+            r, g, b, a = subsection.get_at((x, y))
+            subsection.set_at((x, y), (255 - r, 255 - g, 255 - b, a))
+    
+    # Unlock the surface
+    subsection.unlock()
+    
+    # Blit the inverted subsection back onto the surface
+    for x in range(subsection.get_width()):
+        for y in range(subsection.get_height()):
+            r, g, b, a = surface.get_at((x, y))
+            ir, ig, ib, ia = subsection.get_at((x, y))
+            surface.set_at((x, y), (r & ir, g & ig, b & ib, a & ia))
+    # surface.blit(subsection, (0, 0))
+    return surface
+ 
 class Program:
     def __init__(self, resolution:tuple, fps:int=60):
+        # Hide the system mouse cursor
         # Set all relevant variables
         self.res = resolution
         
@@ -229,13 +250,29 @@ class Program:
         self.drag_data = None
         
         self.tools = {
-            "move": Object(pygame.image.load(os.path.abspath(r"icons/normal/eraser.png")), (84,10)),
-            "paint": Object(pygame.image.load(os.path.abspath(r"icons/normal/paint.png")), (84,10)),
+            "move":   Object(pygame.image.load(os.path.abspath(r"icons/normal/move.png")), (84,10)),
+            "paint":  Object(pygame.image.load(os.path.abspath(r"icons/normal/paint.png")), (84,10)),
             "eraser": Object(pygame.image.load(os.path.abspath(r"icons/normal/eraser.png")), (84,10)),
-            "fill": Object(pygame.image.load(os.path.abspath(r"icons/normal/fill.png")), (84, 10)),
-            "clear": Object(pygame.image.load(os.path.abspath(r"icons/normal/eraser.png")), (84, 10)),
+            "fill":   Object(pygame.image.load(os.path.abspath(r"icons/normal/fill.png")), (84, 10)),
+            "clear":  Object(pygame.image.load(os.path.abspath(r"icons/normal/clear.png")), (84, 10)),
         }
         
+
+        self.cursor_images = {
+            "move":   pygame.image.load(os.path.abspath(r"icons/cursor/move_cursor.png")),
+            "paint":  pygame.image.load(os.path.abspath(r"icons/cursor/paint_cursor.png")),
+            "eraser": pygame.image.load(os.path.abspath(r"icons/cursor/eraser_cursor.png")),
+            "fill":   pygame.image.load(os.path.abspath(r"icons/cursor/fill_cursor.png")),
+            "clear":  pygame.image.load(os.path.abspath(r"icons/cursor/clear_cursor.png")),
+        }
+        self.cursor_pressed_images = {
+            "move":   pygame.image.load(os.path.abspath(r"icons/cursor/move_cursor_pressed.png")),
+            "paint":  pygame.image.load(os.path.abspath(r"icons/cursor/paint_cursor.png")),
+            "eraser": pygame.image.load(os.path.abspath(r"icons/cursor/eraser_cursor_pressed.png")),
+            "fill":   pygame.image.load(os.path.abspath(r"icons/cursor/fill_cursor.png")),
+            "clear":  pygame.image.load(os.path.abspath(r"icons/cursor/clear_cursor.png")),
+        }
+                
         for i, obj in enumerate(self.tools.values()):
             obj.pos = (obj.pos[0]+(i*40), obj.pos[1])
         
@@ -254,7 +291,9 @@ class Program:
         
         self.current_color = self.color_palette.data[0][0].col
         self.tool = "paint"
-        self.camera = Camera([0,0], 2, 2)
+        self.camera = Camera([0,0], 1, 2)
+        self.cursor_surface = pygame.Surface((32,32), pygame.SRCALPHA)
+        self.cursor_surface.fill((255, 255, 255, 0))
         
         # Start pygame window
         self.initialise_pygame()
@@ -265,6 +304,7 @@ class Program:
         
     def initialise_pygame(self):
         pygame.init()
+        pygame.mouse.set_visible(False)
         pygame.display.set_caption("PxA Painter")
         pygame.display.set_icon(pygame.image.load(os.path.abspath(r"icons/clicked/paint_clicked.png")))
         self.screen = pygame.display.set_mode(self.res)
@@ -276,7 +316,7 @@ class Program:
             self.color_palette.data[0][0].pos[0]-1, 
             self.color_palette.data[0][0].pos[1]-1
         ]
-        self.grid.fill_color(self.color_palette, [[0 for _ in range(0, self.grid.size[0])] for _ in range(self.grid.size[1])])
+        self.grid.fill_color(self.color_palette, [[1 for _ in range(0, self.grid.size[0])] for _ in range(self.grid.size[1])])
         
     def main(self):
         while self.running:
@@ -284,6 +324,7 @@ class Program:
             self.clock.tick(self.fps)
             
             mouse_pos = pygame.mouse.get_pos()
+
             mouse_offset = [mouse_pos[0]-self.camera.pos[0], mouse_pos[1]-self.camera.pos[1]] 
             mouse_pressed = pygame.mouse.get_pressed()
             keys = pygame.key.get_pressed()
@@ -291,19 +332,26 @@ class Program:
             self.camera.behaviour(keys)
             
             #region Events
+            
+            if not mouse_pressed[0]:
+                self.drag_data = None
             if mouse_pressed[0]:
                 # Pixel Grid events
                 if not (self.tool_bar.rep.get_rect(topleft=self.tool_bar.pos).collidepoint(mouse_pos)):
                     if self.tool == "move":
-                        self.drag_data = [mouse_pos[0]-(self.grid.cell_size*self.grid.size[0])/2, mouse_pos[1]-(self.grid.cell_size*self.grid.size[1])/2]
-                        
+                        if self.drag_data is None:
+                            self.drag_data = [mouse_pos[0], mouse_pos[1]]
+                        else:
+                            self.camera.pos[0] += mouse_pos[0] - self.drag_data[0]
+                            self.camera.pos[1] += mouse_pos[1] - self.drag_data[1]
+                            self.drag_data = [mouse_pos[0], mouse_pos[1]]                
                     elif self.tool != "move":
                         self.drag_data = None  
                     
-                if self.drag_data:
-                    self.camera.pos = self.drag_data
                 for iy, row in enumerate(self.grid.data):
-                    for ix, obj in enumerate(row):                
+                    for ix, obj in enumerate(row):
+                        
+                        obj.collision = lambda: obj.rep.get_rect(topleft=[obj.pos[0] * self.camera.scale, obj.pos[1] * self.camera.scale]).collidepoint
                         if obj.collision()(mouse_offset):
                                 match self.tool:
                                     case "paint":
@@ -367,6 +415,12 @@ class Program:
                 elif event.type == pygame.KEYUP:
                     if event.key == K_SPACE:
                         self.tool = "paint"
+                        
+                elif event.type == pygame.MOUSEBUTTONDOWN:
+                    if event.button == 4:  # Scroll up
+                        self.camera.scale = min(self.camera.scale + 0.1, 10)
+                    elif event.button == 5:  # Scroll down
+                        self.camera.scale = max(self.camera.scale - 0.1, 0.1)
             #endregion
             
             #region Drawing
@@ -375,7 +429,9 @@ class Program:
             # Draw pixel grid
             for row in self.grid.data:
                 for obj in row:
-                    self.screen.blit(obj.rep, [obj.pos[0]+self.camera.pos[0], obj.pos[1]+self.camera.pos[1]])
+                    obj_scaled = pygame.transform.scale(obj.rep, (self.camera.scale * self.grid.cell_size, self.camera.scale * self.grid.cell_size))
+                    self.screen.blit(obj_scaled, [obj.pos[0] * self.camera.scale + self.camera.pos[0], obj.pos[1] * self.camera.scale + self.camera.pos[1]])
+                    # self.screen.blit(obj.rep, [obj.pos[0]+self.camera.pos[0], obj.pos[1]+self.camera.pos[1]])
                     
             # Switch tools 
             self.tools[self.tool].rep = self.tools[self.tool].clicked_image
@@ -399,7 +455,17 @@ class Program:
                 for obj in row:
                     if obj.active:
                         self.screen.blit(obj.rep, obj.pos)
-            
+                        
+            # Draw cursor
+            # Invert the color of the pixel under the cursor    
+            if mouse_pressed[0]:
+                self.cursor_surface = self.cursor_pressed_images[self.tool]
+            else:
+                self.cursor_surface = self.cursor_images[self.tool]
+            try:
+                self.screen.blit(invert_surface(self.cursor_surface, self.screen, mouse_pos), mouse_pos)
+            except:
+                self.screen.blit(self.cursor_surface, (mouse_pos[0]+2, mouse_pos[1]+2))
             pygame.display.flip()
             #endregion
             
